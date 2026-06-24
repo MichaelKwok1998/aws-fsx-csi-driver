@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -1549,6 +1550,156 @@ func TestResizeFileSystem(t *testing.T) {
 				}
 				if resp != initialSizeGiB {
 					t.Fatalf("ResizeFileSystem returned %d GiB as resized storage capacity, expected %d GiB", resp, initialSizeGiB)
+				}
+
+				mockCtl.Finish()
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, tc.testFunc)
+	}
+}
+
+func TestWaitForFileSystemAvailable(t *testing.T) {
+	var fileSystemId = "fs-1234"
+
+	testCases := []struct {
+		name     string
+		testFunc func(t *testing.T)
+	}{
+		{
+			name: "success: filesystem becomes AVAILABLE",
+			testFunc: func(t *testing.T) {
+				mockCtl := gomock.NewController(t)
+				mockFSx := mocks.NewMockFSx(mockCtl)
+				c := &cloud{fsx: mockFSx}
+
+				ctx := context.Background()
+				describeInput := &fsx.DescribeFileSystemsInput{
+					FileSystemIds: []string{fileSystemId},
+				}
+				describeOutput := &fsx.DescribeFileSystemsOutput{
+					FileSystems: []types.FileSystem{
+						{
+							FileSystemId: aws.String(fileSystemId),
+							Lifecycle:    types.FileSystemLifecycleAvailable,
+						},
+					},
+				}
+
+				mockFSx.EXPECT().DescribeFileSystems(gomock.Eq(ctx), gomock.Eq(describeInput)).Return(describeOutput, nil)
+				err := c.WaitForFileSystemAvailable(ctx, fileSystemId)
+				if err != nil {
+					t.Fatalf("WaitForFileSystemAvailable returned unexpected error: %v", err)
+				}
+
+				mockCtl.Finish()
+			},
+		},
+		{
+			name: "failure: filesystem enters FAILED state with FailureDetails",
+			testFunc: func(t *testing.T) {
+				mockCtl := gomock.NewController(t)
+				mockFSx := mocks.NewMockFSx(mockCtl)
+				c := &cloud{fsx: mockFSx}
+
+				ctx := context.Background()
+				failureMsg := "Amazon FSx is unable to create a new file system because the specified subnet is out of available IP addresses"
+				describeInput := &fsx.DescribeFileSystemsInput{
+					FileSystemIds: []string{fileSystemId},
+				}
+				describeOutput := &fsx.DescribeFileSystemsOutput{
+					FileSystems: []types.FileSystem{
+						{
+							FileSystemId: aws.String(fileSystemId),
+							Lifecycle:    types.FileSystemLifecycleFailed,
+							FailureDetails: &types.FileSystemFailureDetails{
+								Message: aws.String(failureMsg),
+							},
+						},
+					},
+				}
+
+				mockFSx.EXPECT().DescribeFileSystems(gomock.Eq(ctx), gomock.Eq(describeInput)).Return(describeOutput, nil)
+				err := c.WaitForFileSystemAvailable(ctx, fileSystemId)
+				if err == nil {
+					t.Fatal("WaitForFileSystemAvailable expected error, got nil")
+				}
+				if !errors.Is(err, ErrFsLifecycleFailed) {
+					t.Fatalf("expected error to wrap ErrFsLifecycleFailed, got: %v", err)
+				}
+				if !strings.Contains(err.Error(), failureMsg) {
+					t.Fatalf("expected error to contain failure message %q, got: %v", failureMsg, err)
+				}
+
+				mockCtl.Finish()
+			},
+		},
+		{
+			name: "failure: filesystem enters FAILED state without FailureDetails",
+			testFunc: func(t *testing.T) {
+				mockCtl := gomock.NewController(t)
+				mockFSx := mocks.NewMockFSx(mockCtl)
+				c := &cloud{fsx: mockFSx}
+
+				ctx := context.Background()
+				describeInput := &fsx.DescribeFileSystemsInput{
+					FileSystemIds: []string{fileSystemId},
+				}
+				describeOutput := &fsx.DescribeFileSystemsOutput{
+					FileSystems: []types.FileSystem{
+						{
+							FileSystemId:   aws.String(fileSystemId),
+							Lifecycle:      types.FileSystemLifecycleFailed,
+							FailureDetails: nil,
+						},
+					},
+				}
+
+				mockFSx.EXPECT().DescribeFileSystems(gomock.Eq(ctx), gomock.Eq(describeInput)).Return(describeOutput, nil)
+				err := c.WaitForFileSystemAvailable(ctx, fileSystemId)
+				if err == nil {
+					t.Fatal("WaitForFileSystemAvailable expected error, got nil")
+				}
+				if !errors.Is(err, ErrFsLifecycleFailed) {
+					t.Fatalf("expected error to wrap ErrFsLifecycleFailed, got: %v", err)
+				}
+				if !strings.Contains(err.Error(), "unknown reason") {
+					t.Fatalf("expected error to contain 'unknown reason', got: %v", err)
+				}
+
+				mockCtl.Finish()
+			},
+		},
+		{
+			name: "failure: filesystem enters unexpected state",
+			testFunc: func(t *testing.T) {
+				mockCtl := gomock.NewController(t)
+				mockFSx := mocks.NewMockFSx(mockCtl)
+				c := &cloud{fsx: mockFSx}
+
+				ctx := context.Background()
+				describeInput := &fsx.DescribeFileSystemsInput{
+					FileSystemIds: []string{fileSystemId},
+				}
+				describeOutput := &fsx.DescribeFileSystemsOutput{
+					FileSystems: []types.FileSystem{
+						{
+							FileSystemId: aws.String(fileSystemId),
+							Lifecycle:    types.FileSystemLifecycleDeleting,
+						},
+					},
+				}
+
+				mockFSx.EXPECT().DescribeFileSystems(gomock.Eq(ctx), gomock.Eq(describeInput)).Return(describeOutput, nil)
+				err := c.WaitForFileSystemAvailable(ctx, fileSystemId)
+				if err == nil {
+					t.Fatal("WaitForFileSystemAvailable expected error, got nil")
+				}
+				if errors.Is(err, ErrFsLifecycleFailed) {
+					t.Fatalf("unexpected state should not wrap ErrFsLifecycleFailed, got: %v", err)
 				}
 
 				mockCtl.Finish()

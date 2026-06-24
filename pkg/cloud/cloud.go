@@ -70,6 +70,9 @@ var (
 
 	// ErrNotFound is returned when a resource is not found.
 	ErrNotFound = errors.New("Resource was not found")
+
+	// ErrFsLifecycleFailed is returned when a filesystem enters the terminal FAILED lifecycle state.
+	ErrFsLifecycleFailed = errors.New("filesystem reached terminal FAILED state")
 )
 
 // FileSystem represents a FSx for Lustre filesystem
@@ -381,6 +384,12 @@ func (c *cloud) WaitForFileSystemAvailable(ctx context.Context, fileSystemId str
 			return true, nil
 		case "CREATING":
 			return false, nil
+		case "FAILED":
+			msg := "unknown reason"
+			if fs.FailureDetails != nil && fs.FailureDetails.Message != nil {
+				msg = *fs.FailureDetails.Message
+			}
+			return true, fmt.Errorf("%w: filesystem %s: %s", ErrFsLifecycleFailed, fileSystemId, msg)
 		default:
 			return true, fmt.Errorf("unexpected state for filesystem %s: %q", fileSystemId, string(fs.Lifecycle))
 		}
